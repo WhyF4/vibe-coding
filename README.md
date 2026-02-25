@@ -1,14 +1,21 @@
-# Regenerative Cooling Channel Optimizer Applet
+# Rocket Engine Pre-Design Applet
 
-A lightweight desktop applet for **early-stage regenerative cooling channel design** in rocket engines.
+A lightweight desktop applet for early-stage rocket engine sizing and nozzle geometry visualization.
 
-It provides:
-- A user-friendly GUI to enter engine/coolant parameters.
-- Tunable geometry bounds (channel count, width, height, rib thickness).
-- A fast random-search optimizer that balances pressure drop, coolant temperature rise, and manufacturability.
-- Ranked top candidate geometries.
+## Features
 
-> This tool is for conceptual trade studies, not high-fidelity CFD/CHT certification.
+- Select common **fuel/oxidizer pairs** using dropdowns.
+- Input **thrust**, **chamber pressure**, and **O/F ratio**.
+- Run a lightweight conceptual **thermochemistry estimate** for `c*` and `Isp,vac`.
+- Size basic engine parameters (throat/exit radii, mass flow, nozzle length).
+- Choose **conical** or **parabolic** nozzle and configure key nozzle parameters.
+- View a built-in **2D nozzle contour** plot in the GUI.
+- Switch common **units** with dropdowns:
+  - thrust: `N`, `kN`, `lbf`
+  - pressure: `MPa`, `bar`, `psi`
+  - length output: `mm`, `m`, `in`
+
+> This app is intended for conceptual studies and first-pass sizing, not high-fidelity CEA/CFD/CHT certification work.
 
 ## Quick start
 
@@ -16,29 +23,23 @@ It provides:
 python app.py
 ```
 
-No third-party dependencies are required (uses built-in `tkinter`).
+No third-party dependencies are required (`tkinter` is part of Python stdlib).
 
-## Model assumptions
+## Included propellant pairs
 
-The backend uses simple, transparent correlations:
-- Hydraulic diameter and flow velocity from channel dimensions.
-- Laminar/turbulent friction estimate for pressure drop.
-- Total heat load estimate from heat flux × wetted area.
-- Coolant temperature rise from energy balance.
-- A heuristic manufacturability score based on aspect ratio preference.
+- RP-1 / LOX
+- Liquid Methane / LOX
+- Liquid Hydrogen / LOX
+- Ethanol / LOX
+- IPA / LOX
+- Jet-A / LOX
 
-The optimizer minimizes a weighted score:
+## Files
 
-```text
-score = 2.5 * pressure_penalty + 2.0 * thermal_penalty - 0.4 * manufacturability_bonus
-```
+- `app.py`: GUI, input handling, and nozzle contour drawing.
+- `engine_design.py`: conceptual thermochemistry, sizing model, and unit conversions.
+- `cooling_optimizer.py`: existing regenerative cooling channel optimizer backend.
 
-You can adapt these weights in `cooling_optimizer.py`.
+## Model notes
 
-## Suggested next upgrades
-
-- Add constraints for max wall temperature and stress limits.
-- Add gradient-based/local refinement after random search.
-- Export results to CSV/JSON.
-- Support axial zoning (different channel geometry by station).
-- Integrate real propellant property tables.
+The thermochemistry and nozzle sizing are simplified trend models intended for speed and transparency. Use this tool for fast trade studies, then refine with higher-fidelity tools for detailed design.
