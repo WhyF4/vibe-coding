@@ -8,6 +8,45 @@ from tkinter import messagebox, ttk
 from cooling_optimizer import EngineInputs, history_to_text, random_search
 
 
+COOLANT_LIBRARY: dict[str, dict[str, float]] = {
+    "RP-1": {
+        "coolant_cp_j_kgk": 2100.0,
+        "coolant_density_kg_m3": 810.0,
+        "coolant_viscosity_pa_s": 0.0018,
+    },
+    "Ethanol": {
+        "coolant_cp_j_kgk": 2600.0,
+        "coolant_density_kg_m3": 789.0,
+        "coolant_viscosity_pa_s": 0.0012,
+    },
+    "Jet-A": {
+        "coolant_cp_j_kgk": 2100.0,
+        "coolant_density_kg_m3": 800.0,
+        "coolant_viscosity_pa_s": 0.0016,
+    },
+    "IPA": {
+        "coolant_cp_j_kgk": 2650.0,
+        "coolant_density_kg_m3": 786.0,
+        "coolant_viscosity_pa_s": 0.0021,
+    },
+    "Liquid Methane": {
+        "coolant_cp_j_kgk": 3500.0,
+        "coolant_density_kg_m3": 422.0,
+        "coolant_viscosity_pa_s": 0.00011,
+    },
+    "Liquid Oxygen": {
+        "coolant_cp_j_kgk": 1700.0,
+        "coolant_density_kg_m3": 1140.0,
+        "coolant_viscosity_pa_s": 0.00019,
+    },
+    "Liquid Hydrogen": {
+        "coolant_cp_j_kgk": 9700.0,
+        "coolant_density_kg_m3": 71.0,
+        "coolant_viscosity_pa_s": 0.000013,
+    },
+}
+
+
 class CoolingOptimizerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -16,6 +55,7 @@ class CoolingOptimizerApp:
 
         self.inputs: dict[str, tk.StringVar] = {}
         self.bounds: dict[str, tuple[tk.StringVar, tk.StringVar]] = {}
+        self.coolant_name = tk.StringVar(value="RP-1")
 
         self._build_ui()
 
@@ -47,21 +87,42 @@ class CoolingOptimizerApp:
         group = ttk.LabelFrame(parent, text="Engine & Coolant Inputs", padding=8)
         group.pack(fill=tk.X, pady=(0, 10))
 
+        ttk.Label(group, text="Coolant preset").grid(row=0, column=0, sticky=tk.W, pady=(0, 4))
+        coolant_dropdown = ttk.Combobox(
+            group,
+            textvariable=self.coolant_name,
+            values=list(COOLANT_LIBRARY.keys()),
+            state="readonly",
+            width=16,
+        )
+        coolant_dropdown.grid(row=0, column=1, sticky=tk.W, pady=(0, 4))
+        coolant_dropdown.bind("<<ComboboxSelected>>", self.on_coolant_selected)
+
         fields = [
             ("chamber_pressure_mpa", "Chamber pressure (MPa)", "12.0"),
             ("heat_flux_mw_m2", "Wall heat flux (MW/m²)", "18.0"),
             ("coolant_mass_flow_kg_s", "Coolant mass flow (kg/s)", "2.8"),
-            ("coolant_cp_j_kgk", "Coolant Cp (J/kg-K)", "2500"),
-            ("coolant_density_kg_m3", "Coolant density (kg/m³)", "820"),
-            ("coolant_viscosity_pa_s", "Coolant viscosity (Pa·s)", "0.00045"),
+            ("coolant_cp_j_kgk", "Coolant Cp (J/kg-K)", "2100"),
+            ("coolant_density_kg_m3", "Coolant density (kg/m³)", "810"),
+            ("coolant_viscosity_pa_s", "Coolant viscosity (Pa·s)", "0.0018"),
             ("wall_length_m", "Cooling jacket length (m)", "1.1"),
         ]
 
-        for row, (key, label, default) in enumerate(fields):
+        for row, (key, label, default) in enumerate(fields, start=1):
             ttk.Label(group, text=label).grid(row=row, column=0, sticky=tk.W, pady=2)
             var = tk.StringVar(value=default)
             ttk.Entry(group, textvariable=var, width=14).grid(row=row, column=1, sticky=tk.E, pady=2)
             self.inputs[key] = var
+
+    def on_coolant_selected(self, _: object = None) -> None:
+        selected = self.coolant_name.get()
+        if selected not in COOLANT_LIBRARY:
+            return
+
+        preset = COOLANT_LIBRARY[selected]
+        self.inputs["coolant_cp_j_kgk"].set(f"{preset['coolant_cp_j_kgk']}")
+        self.inputs["coolant_density_kg_m3"].set(f"{preset['coolant_density_kg_m3']}")
+        self.inputs["coolant_viscosity_pa_s"].set(f"{preset['coolant_viscosity_pa_s']}")
 
     def _build_bounds_section(self, parent: ttk.Frame) -> None:
         group = ttk.LabelFrame(parent, text="Geometry Search Bounds", padding=8)
@@ -133,6 +194,7 @@ class CoolingOptimizerApp:
 
         summary = (
             f"Best geometry after {iterations} samples:\n"
+            f"• Coolant: {self.coolant_name.get()}\n"
             f"• Channels: {best_geometry.channel_count}\n"
             f"• Width: {best_geometry.width_mm:.2f} mm\n"
             f"• Height: {best_geometry.height_mm:.2f} mm\n"

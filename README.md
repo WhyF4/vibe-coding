@@ -4,6 +4,7 @@ A lightweight desktop applet for **early-stage regenerative cooling channel desi
 
 It provides:
 - A user-friendly GUI to enter engine/coolant parameters.
+- Coolant preset dropdown for ethanol, Jet-A, liquid methane, liquid oxygen, liquid hydrogen, RP-1, and IPA.
 - Tunable geometry bounds (channel count, width, height, rib thickness).
 - A fast random-search optimizer that balances pressure drop, coolant temperature rise, and manufacturability.
 - Ranked top candidate geometries.
@@ -17,6 +18,8 @@ python app.py
 ```
 
 No third-party dependencies are required (uses built-in `tkinter`).
+
+When you pick a coolant preset, Cp/density/viscosity fields auto-fill and remain editable for custom tuning.
 
 ## Model assumptions
 
