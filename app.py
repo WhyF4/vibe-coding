@@ -5,7 +5,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from cooling_optimizer import EngineInputs, estimate_regen_temperatures, history_to_text, random_search
+from cooling_optimizer import EngineInputs, history_to_text, random_search, solve_regen_axial
 from engine_design import (
     NozzleConfig,
     generate_engine_contour,
@@ -37,9 +37,10 @@ class EngineCoolingApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Rocket Engine Design + Regen Cooling")
-        self.root.geometry("1250x820")
+        self.root.geometry("1300x860")
 
         self.latest_result = None
+        self.latest_contour: list[tuple[float, float]] | None = None
 
         self._init_engine_vars()
         self._init_regen_vars()
@@ -84,6 +85,7 @@ class EngineCoolingApp:
         self.wall_length_var = tk.StringVar(value="1.2")
         self.chamber_temp_var = tk.StringVar(value="3500")
         self.gamma_var = tk.StringVar(value="1.22")
+        self.station_count_var = tk.StringVar(value="40")
 
         self.bounds_vars = {
             "channel_count": (tk.StringVar(value="120"), tk.StringVar(value="420")),
@@ -92,17 +94,15 @@ class EngineCoolingApp:
             "rib_thickness_mm": (tk.StringVar(value="0.5"), tk.StringVar(value="2.4")),
         }
         self.iterations_var = tk.StringVar(value="1400")
-        self.regen_summary_var = tk.StringVar(value="Run optimization in Regen tab to estimate channel geometry and temperatures.")
+        self.regen_summary_var = tk.StringVar(value="Run optimization in Regen tab to estimate channel geometry and axial temperatures.")
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self.root, padding=10)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(
-            outer,
-            text="Rocket Engine Preliminary Design Suite",
-            font=("Segoe UI", 16, "bold"),
-        ).pack(anchor=tk.W, pady=(0, 8))
+        ttk.Label(outer, text="Rocket Engine Preliminary Design Suite", font=("Segoe UI", 16, "bold")).pack(
+            anchor=tk.W, pady=(0, 8)
+        )
 
         notebook = ttk.Notebook(outer)
         notebook.pack(fill=tk.BOTH, expand=True)
@@ -126,17 +126,15 @@ class EngineCoolingApp:
         self._build_propellant_section(left)
         self._build_chamber_nozzle_section(left)
 
-        buttons = ttk.Frame(left)
-        buttons.pack(fill=tk.X, pady=(6, 8))
-        ttk.Button(buttons, text="Run engine design", command=self.run_engine_design).pack(side=tk.LEFT)
+        ttk.Button(left, text="Run engine design", command=self.run_engine_design).pack(anchor=tk.W, pady=(6, 8))
 
         result_group = ttk.LabelFrame(right, text="Engine Results", padding=8)
         result_group.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(result_group, textvariable=self.engine_summary_var, justify=tk.LEFT, wraplength=560).pack(anchor=tk.W)
+        ttk.Label(result_group, textvariable=self.engine_summary_var, justify=tk.LEFT, wraplength=590).pack(anchor=tk.W)
 
         plot_group = ttk.LabelFrame(right, text="2D Chamber + Nozzle Contour", padding=8)
         plot_group.pack(fill=tk.BOTH, expand=True)
-        self.engine_canvas = tk.Canvas(plot_group, width=620, height=500, bg="#11141a", highlightthickness=1)
+        self.engine_canvas = tk.Canvas(plot_group, width=640, height=500, bg="#11141a", highlightthickness=1)
         self.engine_canvas.pack(fill=tk.BOTH, expand=True)
         self._draw_engine_placeholder()
 
@@ -172,9 +170,6 @@ class EngineCoolingApp:
 
         ttk.Label(group, text="Exit pressure").grid(row=5, column=0, sticky=tk.W, pady=2)
         ttk.Entry(group, textvariable=self.exit_pressure_var, width=12).grid(row=5, column=1, sticky=tk.W, pady=2)
-        ttk.Combobox(group, textvariable=self.pressure_unit_var, values=["MPa", "bar", "psi"], state="readonly", width=8).grid(
-            row=5, column=2, sticky=tk.W, padx=6
-        )
 
         ttk.Label(group, text="Display length unit").grid(row=6, column=0, sticky=tk.W, pady=2)
         ttk.Combobox(group, textvariable=self.length_unit_var, values=["mm", "m", "in"], state="readonly", width=10).grid(
@@ -217,7 +212,7 @@ class EngineCoolingApp:
         left = ttk.Frame(split, padding=6)
         right = ttk.Frame(split, padding=6)
         split.add(left, weight=1)
-        split.add(right, weight=1)
+        split.add(right, weight=2)
 
         self._build_regen_inputs(left)
         self._build_regen_bounds(left)
@@ -227,13 +222,32 @@ class EngineCoolingApp:
         ttk.Button(controls, text="Load from engine tab", command=self.load_engine_into_regen).pack(side=tk.LEFT)
         ttk.Button(controls, text="Run regen optimization", command=self.run_regen).pack(side=tk.LEFT, padx=8)
 
-        output_group = ttk.LabelFrame(right, text="Regen Results (with Bartz estimate)", padding=8)
+        output_group = ttk.LabelFrame(right, text="Regen Results (Bartz + Axial Stations)", padding=8)
         output_group.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(output_group, textvariable=self.regen_summary_var, justify=tk.LEFT, wraplength=560).pack(anchor=tk.W)
+        ttk.Label(output_group, textvariable=self.regen_summary_var, justify=tk.LEFT, wraplength=760).pack(anchor=tk.W)
 
-        self.regen_history = tk.Text(output_group, height=20, wrap=tk.WORD)
-        self.regen_history.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
-        self.regen_history.configure(state=tk.DISABLED)
+        self.regen_plot = tk.Canvas(output_group, width=760, height=260, bg="#101218", highlightthickness=1)
+        self.regen_plot.pack(fill=tk.X, pady=(8, 8))
+
+        columns = ("i", "x", "ar", "m", "twg", "twc", "tc", "q", "hg", "hc", "dp")
+        self.regen_table = ttk.Treeview(output_group, columns=columns, show="headings", height=12)
+        headings = {
+            "i": "Station",
+            "x": "x (m)",
+            "ar": "A/At",
+            "m": "M",
+            "twg": "T_w,hot (K)",
+            "twc": "T_w,cold (K)",
+            "tc": "T_cool (K)",
+            "q": "q\" (MW/m²)",
+            "hg": "h_g (W/m²-K)",
+            "hc": "h_c (W/m²-K)",
+            "dp": "ΔP_cool (MPa)",
+        }
+        for key in columns:
+            self.regen_table.heading(key, text=headings[key])
+            self.regen_table.column(key, width=88, anchor=tk.E)
+        self.regen_table.pack(fill=tk.BOTH, expand=True)
 
     def _build_regen_inputs(self, parent: ttk.Frame) -> None:
         group = ttk.LabelFrame(parent, text="Coolant / Wall Inputs", padding=8)
@@ -253,9 +267,10 @@ class EngineCoolingApp:
             ("Coolant k (W/m-K)", self.coolant_k_var),
             ("Heat flux estimate (MW/m²)", self.heat_flux_var),
             ("Hot-wall length (m)", self.wall_length_var),
-            ("Gas temperature (K)", self.chamber_temp_var),
+            ("Gas temperature T0 (K)", self.chamber_temp_var),
             ("Gamma", self.gamma_var),
             ("Wall thickness (mm)", self.wall_thickness_var),
+            ("# axial stations", self.station_count_var),
         ]
         for row, (label, var) in enumerate(entries, start=1):
             ttk.Label(group, text=label).grid(row=row, column=0, sticky=tk.W, pady=2)
@@ -296,9 +311,7 @@ class EngineCoolingApp:
         try:
             pair = get_propellant_pair(self.fuel_var.get(), self.ox_var.get())
             self.suggested_of_var.set(f"Suggested O/F: {pair.of_opt:.2f}")
-            if abs(float(self.of_var.get())) < 1e-9:
-                self.of_var.set(f"{pair.of_opt:.2f}")
-        except Exception:
+        except ValueError:
             self.suggested_of_var.set("Suggested O/F: --")
 
     def on_coolant_change(self, _: object = None) -> None:
@@ -338,6 +351,7 @@ class EngineCoolingApp:
             return
 
         self.latest_result = (result, nozzle, pc_mpa)
+        self.latest_contour = contour
         u = self.length_unit_var.get()
         pressure_unit = self.pressure_unit_var.get()
         summary = (
@@ -353,12 +367,12 @@ class EngineCoolingApp:
 
     def _draw_engine_placeholder(self) -> None:
         self.engine_canvas.delete("all")
-        self.engine_canvas.create_text(300, 250, text="Run engine design to render chamber + nozzle", fill="#d8dde8")
+        self.engine_canvas.create_text(320, 250, text="Run engine design to render chamber + nozzle", fill="#d8dde8")
 
     def _draw_engine_contour(self, contour: list[tuple[float, float]], unit: str) -> None:
         c = self.engine_canvas
         c.delete("all")
-        w, h = max(c.winfo_width(), 620), max(c.winfo_height(), 500)
+        w, h = max(c.winfo_width(), 640), max(c.winfo_height(), 500)
         pad = 55
         xs = [p[0] for p in contour]
         rs = [p[1] for p in contour]
@@ -373,7 +387,7 @@ class EngineCoolingApp:
 
         c.create_line(pad, h / 2, w - pad, h / 2, fill="#5f697d")
         c.create_line(pad, pad, pad, h - pad, fill="#5f697d")
-        c.create_text(w - 28, h / 2 + 14, text=f"x [{unit}]", fill="#cfd6e3")
+        c.create_text(w - 30, h / 2 + 14, text=f"x [{unit}]", fill="#cfd6e3")
         c.create_text(35, pad - 16, text=f"r [{unit}]", fill="#cfd6e3")
 
         top, bot = [], []
@@ -382,18 +396,6 @@ class EngineCoolingApp:
             bot.extend([tx(x), ty(-r)])
         c.create_line(*top, fill="#77d5ff", width=2)
         c.create_line(*bot, fill="#77d5ff", width=2)
-
-        # Ticks and labels
-        for i in range(6):
-            xv = x_min + (x_max - x_min) * (i / 5)
-            xp = tx(xv)
-            c.create_line(xp, h / 2 - 4, xp, h / 2 + 4, fill="#5f697d")
-            c.create_text(xp, h / 2 + 18, text=f"{meters_to_unit(xv, unit):.1f}", fill="#cfd6e3", font=("Segoe UI", 8))
-        for i in range(5):
-            rv = r_max * (i / 4)
-            yp = ty(rv)
-            c.create_line(pad - 4, yp, pad + 4, yp, fill="#5f697d")
-            c.create_text(pad - 22, yp, text=f"{meters_to_unit(rv, unit):.1f}", fill="#cfd6e3", font=("Segoe UI", 8))
 
     def load_engine_into_regen(self) -> None:
         if self.latest_result is None:
@@ -405,6 +407,30 @@ class EngineCoolingApp:
         self.heat_flux_var.set(f"{(6.0 + 0.9 * pc_mpa):.2f}")
         self.chamber_temp_var.set(f"{result.flame_temp_k:.1f}")
         self.gamma_var.set(f"{result.gamma:.3f}")
+
+    def _sample_contour(self, stations: int) -> tuple[list[float], list[float]]:
+        if self.latest_contour is None:
+            length = float(self.wall_length_var.get())
+            xs = [i * length / (stations - 1) for i in range(stations)]
+            rs = [0.04 for _ in xs]
+            return xs, rs
+
+        contour = sorted(self.latest_contour, key=lambda p: p[0])
+        x_vals = [p[0] for p in contour]
+        r_vals = [p[1] for p in contour]
+        x0, x1 = x_vals[0], x_vals[-1]
+        xs = [x0 + (x1 - x0) * i / (stations - 1) for i in range(stations)]
+        rs: list[float] = []
+
+        j = 0
+        for x in xs:
+            while j < len(x_vals) - 2 and x > x_vals[j + 1]:
+                j += 1
+            xa, xb = x_vals[j], x_vals[j + 1]
+            ra, rb = r_vals[j], r_vals[j + 1]
+            t = 0.0 if abs(xb - xa) < 1e-12 else (x - xa) / (xb - xa)
+            rs.append(ra + t * (rb - ra))
+        return xs, rs
 
     def run_regen(self) -> None:
         try:
@@ -420,36 +446,123 @@ class EngineCoolingApp:
             )
             bounds = {k: (float(v[0].get()), float(v[1].get())) for k, v in self.bounds_vars.items()}
             iterations = int(self.iterations_var.get())
-            if iterations <= 0:
-                raise ValueError("Iterations must be positive")
+            stations = int(self.station_count_var.get())
+            if iterations <= 0 or stations < 3:
+                raise ValueError("Iterations must be positive and stations >= 3")
 
             best_geom, best_metrics, history = random_search(engine, bounds, iterations=iterations)
-            regen = estimate_regen_temperatures(
+            xs, rs = self._sample_contour(stations)
+
+            if self.latest_result is not None:
+                eng_res, _, _ = self.latest_result
+                throat_r = eng_res.throat_radius_m
+                cstar = eng_res.cstar_m_s
+                gamma_val = eng_res.gamma
+            else:
+                throat_r = min(rs)
+                cstar = 1600.0
+                gamma_val = float(self.gamma_var.get())
+
+            axial = solve_regen_axial(
                 engine=engine,
                 geometry=best_geom,
+                x_stations_m=xs,
+                radius_stations_m=rs,
                 chamber_temp_k=float(self.chamber_temp_var.get()),
-                gamma=float(self.gamma_var.get()),
+                gamma=gamma_val,
                 wall_thermal_conductivity_w_mk=MATERIALS[self.wall_material_var.get()],
                 wall_thickness_mm=float(self.wall_thickness_var.get()),
                 coolant_inlet_temp_k=float(self.coolant_inlet_temp_var.get()),
+                throat_radius_m=throat_r,
+                throat_curve_radius_m=1.5 * throat_r,
+                cstar_m_s=cstar,
             )
         except ValueError as err:
             messagebox.showerror("Invalid input", str(err))
             return
 
+        max_hot = max(s.wall_hot_k for s in axial)
+        max_q = max(s.q_mw_m2 for s in axial)
+        outlet = axial[-1].coolant_bulk_k
         summary = (
             f"Best geometry: N={best_geom.channel_count}, w={best_geom.width_mm:.2f} mm, h={best_geom.height_mm:.2f} mm, rib={best_geom.rib_thickness_mm:.2f} mm\n"
-            f"Pressure drop: {best_metrics['pressure_drop_mpa']:.3f} MPa | Coolant ΔT (geom model): {best_metrics['coolant_delta_t_k']:.1f} K\n"
-            f"Bartz q\" estimate: {regen['q_flux_mw_m2']:.2f} MW/m² | h_g: {regen['h_g_w_m2k']:.0f} W/m²-K | h_c: {regen['h_c_w_m2k']:.0f} W/m²-K\n"
-            f"Wall hot temp: {regen['wall_hot_k']:.1f} K | Wall cold temp: {regen['wall_cold_k']:.1f} K\n"
-            f"Coolant outlet temp: {regen['coolant_outlet_k']:.1f} K (rise {regen['coolant_rise_k']:.1f} K)"
+            f"Pressure drop (overall geom model): {best_metrics['pressure_drop_mpa']:.3f} MPa | Stations: {stations}\n"
+            f"Peak hot-wall temp: {max_hot:.1f} K | Peak q\": {max_q:.2f} MW/m² | Coolant outlet: {outlet:.1f} K"
         )
         self.regen_summary_var.set(summary)
 
-        self.regen_history.configure(state=tk.NORMAL)
-        self.regen_history.delete("1.0", tk.END)
-        self.regen_history.insert("1.0", history_to_text(history, top_n=10))
-        self.regen_history.configure(state=tk.DISABLED)
+        self._draw_regen_plot(axial)
+        self._fill_regen_table(axial)
+
+    def _draw_regen_plot(self, axial) -> None:
+        c = self.regen_plot
+        c.delete("all")
+        w, h = max(c.winfo_width(), 760), max(c.winfo_height(), 260)
+        pad = 44
+
+        xs = [s.x_m for s in axial]
+        tw_hot = [s.wall_hot_k for s in axial]
+        tw_cold = [s.wall_cold_k for s in axial]
+        tc = [s.coolant_bulk_k for s in axial]
+        q = [s.q_mw_m2 for s in axial]
+
+        x0, x1 = min(xs), max(xs)
+        t_min, t_max = min(min(tw_hot), min(tw_cold), min(tc)), max(max(tw_hot), max(tw_cold), max(tc))
+        q_min, q_max = min(q), max(q)
+
+        def tx(x):
+            return pad + (x - x0) / max(x1 - x0, 1e-9) * (w - 2 * pad)
+
+        def ty_t(v):
+            return h - pad - (v - t_min) / max(t_max - t_min, 1e-9) * (h - 2 * pad)
+
+        def ty_q(v):
+            return h - pad - (v - q_min) / max(q_max - q_min, 1e-9) * (h - 2 * pad)
+
+        c.create_line(pad, h - pad, w - pad, h - pad, fill="#59657d")
+        c.create_line(pad, pad, pad, h - pad, fill="#59657d")
+        c.create_line(w - pad, pad, w - pad, h - pad, fill="#59657d")
+        c.create_text(w / 2, h - 14, text="Axial location x [m]", fill="#d7deea")
+        c.create_text(20, h / 2, text="Temperature [K]", fill="#d7deea", angle=90)
+        c.create_text(w - 16, h / 2, text="q\" [MW/m²]", fill="#d7deea", angle=90)
+
+        def draw_series(vals, mapper, color, dash=None):
+            pts = []
+            for x, v in zip(xs, vals):
+                pts.extend([tx(x), mapper(v)])
+            c.create_line(*pts, fill=color, width=2, dash=dash)
+
+        draw_series(tw_hot, ty_t, "#ff7e67")
+        draw_series(tw_cold, ty_t, "#ffd166")
+        draw_series(tc, ty_t, "#7ec8ff")
+        draw_series(q, ty_q, "#9d8dff", dash=(4, 3))
+
+        c.create_text(120, 16, text="T_wall,hot", fill="#ff7e67")
+        c.create_text(205, 16, text="T_wall,cold", fill="#ffd166")
+        c.create_text(297, 16, text="T_coolant", fill="#7ec8ff")
+        c.create_text(382, 16, text="q\"", fill="#9d8dff")
+
+    def _fill_regen_table(self, axial) -> None:
+        for item in self.regen_table.get_children():
+            self.regen_table.delete(item)
+        for i, s in enumerate(axial, start=1):
+            self.regen_table.insert(
+                "",
+                tk.END,
+                values=(
+                    i,
+                    f"{s.x_m:.4f}",
+                    f"{s.area_ratio:.3f}",
+                    f"{s.mach:.3f}",
+                    f"{s.wall_hot_k:.1f}",
+                    f"{s.wall_cold_k:.1f}",
+                    f"{s.coolant_bulk_k:.1f}",
+                    f"{s.q_mw_m2:.3f}",
+                    f"{s.hg_w_m2k:.0f}",
+                    f"{s.hc_w_m2k:.0f}",
+                    f"{s.pressure_drop_mpa:.4f}",
+                ),
+            )
 
     def run(self) -> None:
         self.root.mainloop()

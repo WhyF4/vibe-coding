@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import pi
 import random
 from typing import Dict, List, Tuple
 
@@ -25,6 +26,20 @@ class Geometry:
     width_mm: float
     height_mm: float
     rib_thickness_mm: float
+
+
+@dataclass
+class AxialStationResult:
+    x_m: float
+    area_ratio: float
+    mach: float
+    hg_w_m2k: float
+    hc_w_m2k: float
+    q_mw_m2: float
+    wall_hot_k: float
+    wall_cold_k: float
+    coolant_bulk_k: float
+    pressure_drop_mpa: float
 
 
 def compute_metrics(engine: EngineInputs, geometry: Geometry) -> Dict[str, float]:
@@ -62,6 +77,7 @@ def compute_metrics(engine: EngineInputs, geometry: Geometry) -> Dict[str, float
         "velocity_m_s": velocity,
         "reynolds": reynolds,
         "hydraulic_diameter_m": hydraulic_diameter,
+        "friction_factor": friction_factor,
         "pressure_drop_mpa": pressure_drop_pa / 1e6,
         "coolant_delta_t_k": coolant_delta_t,
         "heat_load_mw": heat_load_w / 1e6,
@@ -71,59 +87,170 @@ def compute_metrics(engine: EngineInputs, geometry: Geometry) -> Dict[str, float
     }
 
 
-def estimate_regen_temperatures(
+def _solve_mach_from_area_ratio(area_ratio: float, gamma: float, supersonic: bool) -> float:
+    target = max(area_ratio, 1.0)
+    lo, hi = (1.0001, 8.0) if supersonic else (0.01, 0.999)
+
+    def f(m: float) -> float:
+        term = (2.0 / (gamma + 1.0)) * (1.0 + 0.5 * (gamma - 1.0) * m**2)
+        area = (1.0 / m) * term ** ((gamma + 1.0) / (2.0 * (gamma - 1.0)))
+        return area
+
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if supersonic:
+            if f(mid) < target:
+                lo = mid
+            else:
+                hi = mid
+        else:
+            if f(mid) > target:
+                lo = mid
+            else:
+                hi = mid
+    return 0.5 * (lo + hi)
+
+
+def bartz_htc(
+    gas_viscosity_pa_s: float,
+    gas_cp_j_kgk: float,
+    gas_pr: float,
+    chamber_pressure_pa: float,
+    cstar_m_s: float,
+    throat_diameter_m: float,
+    throat_curve_radius_m: float,
+    at_over_a: float,
+    gamma: float,
+    mach: float,
+    t0_k: float,
+    wall_hot_guess_k: float,
+) -> float:
+    """Bartz relation per user-provided form."""
+
+    sigma = (
+        1.0
+        / (
+            (0.5 * (wall_hot_guess_k / max(t0_k, 1e-6)) * (1.0 + (gamma - 1.0) * 0.5 * mach**2) + 0.5) ** 0.68
+            * (1.0 + (gamma - 1.0) * 0.5 * mach**2) ** 0.12
+        )
+    )
+
+    hg = (
+        (0.026 / max(throat_diameter_m, 1e-6) ** 0.2)
+        * ((gas_viscosity_pa_s**0.2 * gas_cp_j_kgk) / max(gas_pr, 1e-6) ** 0.6)
+        * (chamber_pressure_pa / max(cstar_m_s, 1e-6)) ** 0.8
+        * (throat_diameter_m / max(throat_curve_radius_m, 1e-6)) ** 0.1
+        * max(at_over_a, 1e-6) ** 0.9
+    ) / max(sigma, 1e-6)
+    return hg
+
+
+def solve_regen_axial(
     engine: EngineInputs,
     geometry: Geometry,
+    x_stations_m: List[float],
+    radius_stations_m: List[float],
     chamber_temp_k: float,
     gamma: float,
     wall_thermal_conductivity_w_mk: float,
     wall_thickness_mm: float,
     coolant_inlet_temp_k: float,
-) -> Dict[str, float]:
+    throat_radius_m: float,
+    throat_curve_radius_m: float,
+    cstar_m_s: float,
+    gas_viscosity_pa_s: float = 4.5e-5,
+    gas_cp_j_kgk: float = 3400.0,
+    gas_pr: float = 0.72,
+) -> List[AxialStationResult]:
     metrics = compute_metrics(engine, geometry)
-    dt = metrics["hydraulic_diameter_m"]
-
-    # Simplified Bartz-style gas-side HTC proxy.
-    pc_pa = engine.chamber_pressure_mpa * 1e6
-    cstar = 1600.0
-    mu_g = 4.5e-5
-    cp_g = 3400.0
-    pr_g = max(0.65, min(0.9, 0.72 + 0.06 * (gamma - 1.2)))
-
-    h_g = (
-        0.026
-        / max(dt, 1e-4) ** 0.2
-        * (mu_g**0.2 * cp_g / (pr_g**0.6))
-        * (pc_pa / max(cstar, 1.0)) ** 0.8
-    )
-
+    dh = metrics["hydraulic_diameter_m"]
     re = metrics["reynolds"]
-    pr_c = (
-        engine.coolant_cp_j_kgk * engine.coolant_viscosity_pa_s / max(engine.coolant_thermal_conductivity_w_mk, 1e-6)
-    )
+    pr_c = engine.coolant_cp_j_kgk * engine.coolant_viscosity_pa_s / max(engine.coolant_thermal_conductivity_w_mk, 1e-6)
     nu_c = 0.023 * max(re, 1.0) ** 0.8 * max(pr_c, 0.1) ** 0.4
-    h_c = nu_c * engine.coolant_thermal_conductivity_w_mk / max(dt, 1e-4)
+    hc = nu_c * engine.coolant_thermal_conductivity_w_mk / max(dh, 1e-6)
 
-    r_g = 1.0 / max(h_g, 1e-6)
-    r_w = (wall_thickness_mm / 1000.0) / max(wall_thermal_conductivity_w_mk, 1e-6)
-    r_c = 1.0 / max(h_c, 1e-6)
+    wall_thickness_m = wall_thickness_mm / 1000.0
+    wetted_perimeter = 2.0 * ((geometry.width_mm + geometry.height_mm) / 1000.0)
 
-    q_flux = (chamber_temp_k - coolant_inlet_temp_k) / max((r_g + r_w + r_c), 1e-9)
-    wall_hot = chamber_temp_k - q_flux * r_g
-    wall_cold = wall_hot - q_flux * r_w
+    results: List[AxialStationResult] = []
+    coolant_temp = coolant_inlet_temp_k
+    cumulative_dp_pa = 0.0
 
-    total_q = q_flux * metrics["total_surface_area_m2"]
-    coolant_outlet = coolant_inlet_temp_k + total_q / max(engine.coolant_mass_flow_kg_s * engine.coolant_cp_j_kgk, 1.0)
+    chamber_pressure_pa = engine.chamber_pressure_mpa * 1e6
+    throat_area = pi * throat_radius_m**2
+    total_len = max(x_stations_m[-1] - x_stations_m[0], 1e-6)
 
-    return {
-        "h_g_w_m2k": h_g,
-        "h_c_w_m2k": h_c,
-        "q_flux_mw_m2": q_flux / 1e6,
-        "wall_hot_k": wall_hot,
-        "wall_cold_k": wall_cold,
-        "coolant_outlet_k": coolant_outlet,
-        "coolant_rise_k": coolant_outlet - coolant_inlet_temp_k,
-    }
+    for i in range(len(x_stations_m)):
+        x = x_stations_m[i]
+        r = max(radius_stations_m[i], throat_radius_m)
+        area = pi * r**2
+        area_ratio = area / max(throat_area, 1e-9)
+
+        mach = _solve_mach_from_area_ratio(area_ratio, gamma, supersonic=x >= x_stations_m[len(x_stations_m) // 2])
+        at_over_a = 1.0 / max(area_ratio, 1e-9)
+
+        wall_hot = chamber_temp_k * 0.75
+        for _ in range(12):
+            hg = bartz_htc(
+                gas_viscosity_pa_s=gas_viscosity_pa_s,
+                gas_cp_j_kgk=gas_cp_j_kgk,
+                gas_pr=gas_pr,
+                chamber_pressure_pa=chamber_pressure_pa,
+                cstar_m_s=cstar_m_s,
+                throat_diameter_m=2.0 * throat_radius_m,
+                throat_curve_radius_m=throat_curve_radius_m,
+                at_over_a=at_over_a,
+                gamma=gamma,
+                mach=mach,
+                t0_k=chamber_temp_k,
+                wall_hot_guess_k=wall_hot,
+            )
+
+            rg = 1.0 / max(hg, 1e-8)
+            rw = wall_thickness_m / max(wall_thermal_conductivity_w_mk, 1e-8)
+            rc = 1.0 / max(hc, 1e-8)
+            q = (chamber_temp_k - coolant_temp) / max(rg + rw + rc, 1e-9)
+            new_wall_hot = chamber_temp_k - q * rg
+            if abs(new_wall_hot - wall_hot) < 1e-3:
+                wall_hot = new_wall_hot
+                break
+            wall_hot = 0.6 * wall_hot + 0.4 * new_wall_hot
+
+        wall_cold = wall_hot - q * rw
+
+        if i < len(x_stations_m) - 1:
+            dx = max(x_stations_m[i + 1] - x, 0.0)
+        else:
+            dx = max(x - x_stations_m[i - 1], 0.0) if i > 0 else total_len
+
+        seg_area = wetted_perimeter * dx * geometry.channel_count
+        coolant_temp += q * seg_area / max(engine.coolant_mass_flow_kg_s * engine.coolant_cp_j_kgk, 1.0)
+
+        dp_seg = (
+            metrics["friction_factor"]
+            * (dx / max(dh, 1e-6))
+            * 0.5
+            * engine.coolant_density_kg_m3
+            * metrics["velocity_m_s"] ** 2
+        )
+        cumulative_dp_pa += dp_seg
+
+        results.append(
+            AxialStationResult(
+                x_m=x,
+                area_ratio=area_ratio,
+                mach=mach,
+                hg_w_m2k=hg,
+                hc_w_m2k=hc,
+                q_mw_m2=q / 1e6,
+                wall_hot_k=wall_hot,
+                wall_cold_k=wall_cold,
+                coolant_bulk_k=coolant_temp,
+                pressure_drop_mpa=cumulative_dp_pa / 1e6,
+            )
+        )
+
+    return results
 
 
 def objective(metrics: Dict[str, float], engine: EngineInputs) -> float:
